@@ -1,0 +1,6 @@
+{
+    "rabbitmqConnectionString": "amqp://thedude:opinion@localhost:5672/",
+    "rabbitmqExchangeName": "messageExchange",
+    "rabbitmqQueueName": "messages",
+    "elasticsearchConnectionString" : "http://localhost:9200"
+}

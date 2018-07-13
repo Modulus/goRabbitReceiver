@@ -2,12 +2,41 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"time"
 
 	"github.com/olivere/elastic"
 	"github.com/streadway/amqp"
 )
+
+type Configuration struct {
+	RabbitmqConnectionString      string
+	RabbitmqExchangeName          string
+	RabbitmqQueueName             string
+	ElasticsearchConnectionString string
+}
+
+func createConfiguration() Configuration {
+
+	file, _ := os.Open("config.json")
+
+	defer file.Close()
+
+	decoder := json.NewDecoder(file)
+	configuration := Configuration{}
+	err := decoder.Decode(&configuration)
+	if err != nil {
+		fmt.Println("error:", err)
+	}
+	fmt.Println(configuration)
+
+	return configuration
+}
 
 func failOnError(err error, msg string) {
 	if err != nil {
@@ -16,8 +45,8 @@ func failOnError(err error, msg string) {
 	}
 }
 
-func buildChannel(exchangeName string) (*amqp.Channel, error) {
-	conn, err := amqp.Dial("amqp://thedude:opinion@localhost:5672/")
+func buildChannel(exchangeName, rabbitmqConnectionString string) (*amqp.Channel, error) {
+	conn, err := amqp.Dial(rabbitmqConnectionString)
 	if err != nil {
 		return nil, err
 	}
@@ -48,16 +77,29 @@ func buildChannel(exchangeName string) (*amqp.Channel, error) {
 	return amqpChan, err
 }
 
-func storeMessage(message string) {
+func CreateHash(message string) string {
+	hasher := sha256.New()
+	hasher.Write([]byte(message))
+	hash := base64.URLEncoding.EncodeToString(hasher.Sum(nil))
+	return hash
+}
+
+func storeMessage(message, elasticsearchConnectionString string) {
 	ctx := context.Background()
-	client, err := elastic.NewClient()
+	client, err := elastic.NewClient(elastic.SetURL(elasticsearchConnectionString), elastic.SetSniff(false))
 	if err != nil {
 		// Handle error
 	}
+	hash := CreateHash(message)
+	currentDate := time.Now()
+
+	//format := "2015/01/01 12:10:30"
+	log.Printf("Current date %s", currentDate.Format(time.UnixDate))
+
 	_, err = client.Index().
 		Index("message").
 		Type("doc").
-		//Id("1").
+		Id(string(hash)).
 		BodyJson(message).
 		Refresh("wait_for").
 		Do(ctx)
@@ -67,29 +109,31 @@ func storeMessage(message string) {
 	}
 }
 
-func readMessages() {
-	conn, err := amqp.Dial("amqp://thedude:opinion@localhost:5672/")
+func readMessages(config Configuration) {
+	log.Printf("Connection to %s", config.RabbitmqConnectionString)
+	conn, err := amqp.Dial(config.RabbitmqConnectionString)
 	failOnError(err, "Failed to connect to RabbitMQ")
 	defer conn.Close()
 
-	ch, err := buildChannel("messageExchange")
+	log.Printf("Sending to exchange: %s", config.RabbitmqExchangeName)
+	ch, err := buildChannel(config.RabbitmqExchangeName, config.RabbitmqConnectionString)
 	failOnError(err, "Failed to open a channel")
 	defer ch.Close()
 
 	q, err := ch.QueueDeclare(
-		"messages", // name
-		false,      // durable
-		false,      // delete when usused
-		false,      // exclusive
-		false,      // no-wait
-		nil,        // arguments
+		config.RabbitmqQueueName, // name
+		false, // durable
+		false, // delete when usused
+		false, // exclusive
+		false, // no-wait
+		nil,   // arguments
 	)
 	failOnError(err, "Failed to declare a queue")
 
 	err = ch.QueueBind(
 		q.Name,
 		"",
-		"messageExchange",
+		config.RabbitmqExchangeName,
 		false,
 		nil,
 	)
@@ -112,7 +156,7 @@ func readMessages() {
 		for d := range msgs {
 			log.Printf("Received a message: %s", d.Body)
 			log.Printf("Saving to elasticsearch")
-			storeMessage(string(d.Body))
+			storeMessage(string(d.Body), config.ElasticsearchConnectionString)
 		}
 	}()
 
@@ -121,5 +165,8 @@ func readMessages() {
 }
 
 func main() {
-	readMessages()
+	config := createConfiguration()
+	fmt.Println(config)
+
+	readMessages(config)
 }
