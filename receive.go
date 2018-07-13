@@ -16,6 +16,38 @@ func failOnError(err error, msg string) {
 	}
 }
 
+func buildChannel(exchangeName string) (*amqp.Channel, error) {
+	conn, err := amqp.Dial("amqp://thedude:opinion@localhost:5672/")
+	if err != nil {
+		return nil, err
+	}
+	amqpChan, err := conn.Channel()
+	if err != nil {
+		return nil, err
+	}
+
+	err = amqpChan.ExchangeDeclare(exchangeName,
+		"fanout",
+		true,
+		false,
+		false,
+		false, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Clear amqp channel if connection to server is lost
+	amqpErrorChan := make(chan *amqp.Error)
+	amqpChan.NotifyClose(amqpErrorChan)
+	go func(ec chan *amqp.Error) {
+		for msg := range ec {
+			log.Fatalf("Channel Cleanup %s\n", msg)
+		}
+	}(amqpErrorChan)
+
+	return amqpChan, err
+}
+
 func storeMessage(message string) {
 	ctx := context.Background()
 	client, err := elastic.NewClient()
@@ -40,7 +72,7 @@ func readMessages() {
 	failOnError(err, "Failed to connect to RabbitMQ")
 	defer conn.Close()
 
-	ch, err := conn.Channel()
+	ch, err := buildChannel("messageExchange")
 	failOnError(err, "Failed to open a channel")
 	defer ch.Close()
 
@@ -53,6 +85,15 @@ func readMessages() {
 		nil,        // arguments
 	)
 	failOnError(err, "Failed to declare a queue")
+
+	err = ch.QueueBind(
+		q.Name,
+		"",
+		"messageExchange",
+		false,
+		nil,
+	)
+	failOnError(err, "Failed to bind queue")
 
 	msgs, err := ch.Consume(
 		q.Name, // queue
