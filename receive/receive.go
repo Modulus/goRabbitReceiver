@@ -1,4 +1,4 @@
-package main
+package receive
 
 import (
 	"context"
@@ -14,6 +14,17 @@ import (
 	"github.com/streadway/amqp"
 )
 
+type Receiver struct {
+	Config Configuration
+}
+
+func NewReceiver(configFilePath string) *Receiver {
+	receiver := new(Receiver)
+	receiver.Config = createConfiguration(configFilePath)
+
+	return receiver
+}
+
 type Configuration struct {
 	RabbitmqConnectionString      string
 	RabbitmqExchangeName          string
@@ -21,15 +32,20 @@ type Configuration struct {
 	ElasticsearchConnectionString string
 }
 
-func createConfiguration() Configuration {
+func createConfiguration(filePath string) Configuration {
+	file, err := os.Open(filePath)
 
-	file, _ := os.Open("config.json")
+	if err != nil {
+		log.Printf("Failed to open file at %s", filePath)
+		file, _ = os.Open("config.json")
+
+	}
 
 	defer file.Close()
 
 	decoder := json.NewDecoder(file)
 	configuration := Configuration{}
-	err := decoder.Decode(&configuration)
+	err = decoder.Decode(&configuration)
 	if err != nil {
 		fmt.Println("error:", err)
 	}
@@ -45,8 +61,8 @@ func failOnError(err error, msg string) {
 	}
 }
 
-func buildChannel(exchangeName, rabbitmqConnectionString string) (*amqp.Channel, error) {
-	conn, err := amqp.Dial(rabbitmqConnectionString)
+func (r Receiver) buildChannel() (*amqp.Channel, error) {
+	conn, err := amqp.Dial(r.Config.RabbitmqConnectionString)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +71,7 @@ func buildChannel(exchangeName, rabbitmqConnectionString string) (*amqp.Channel,
 		return nil, err
 	}
 
-	err = amqpChan.ExchangeDeclare(exchangeName,
+	err = amqpChan.ExchangeDeclare(r.Config.RabbitmqExchangeName,
 		"fanout",
 		true,
 		false,
@@ -77,7 +93,7 @@ func buildChannel(exchangeName, rabbitmqConnectionString string) (*amqp.Channel,
 	return amqpChan, err
 }
 
-func CreateHash(message string) string {
+func createHash(message string) string {
 	hasher := sha256.New()
 	hasher.Write([]byte(message))
 	hash := base64.URLEncoding.EncodeToString(hasher.Sum(nil))
@@ -90,7 +106,7 @@ func storeMessage(message, elasticsearchConnectionString string) {
 	if err != nil {
 		// Handle error
 	}
-	hash := CreateHash(message)
+	hash := createHash(message)
 	currentDate := time.Now()
 
 	//format := "2015/01/01 12:10:30"
@@ -109,19 +125,19 @@ func storeMessage(message, elasticsearchConnectionString string) {
 	}
 }
 
-func readMessages(config Configuration) {
-	log.Printf("Connection to %s", config.RabbitmqConnectionString)
-	conn, err := amqp.Dial(config.RabbitmqConnectionString)
+func (r Receiver) ReadMessages() {
+	log.Printf("Connection to %s", r.Config.RabbitmqConnectionString)
+	conn, err := amqp.Dial(r.Config.RabbitmqConnectionString)
 	failOnError(err, "Failed to connect to RabbitMQ")
 	defer conn.Close()
 
-	log.Printf("Sending to exchange: %s", config.RabbitmqExchangeName)
-	ch, err := buildChannel(config.RabbitmqExchangeName, config.RabbitmqConnectionString)
+	log.Printf("Sending to exchange: %s", r.Config.RabbitmqExchangeName)
+	ch, err := r.buildChannel()
 	failOnError(err, "Failed to open a channel")
 	defer ch.Close()
 
 	q, err := ch.QueueDeclare(
-		config.RabbitmqQueueName, // name
+		r.Config.RabbitmqQueueName, // name
 		false, // durable
 		false, // delete when usused
 		false, // exclusive
@@ -133,7 +149,7 @@ func readMessages(config Configuration) {
 	err = ch.QueueBind(
 		q.Name,
 		"",
-		config.RabbitmqExchangeName,
+		r.Config.RabbitmqExchangeName,
 		false,
 		nil,
 	)
@@ -156,7 +172,7 @@ func readMessages(config Configuration) {
 		for d := range msgs {
 			log.Printf("Received a message: %s", d.Body)
 			log.Printf("Saving to elasticsearch")
-			storeMessage(string(d.Body), config.ElasticsearchConnectionString)
+			storeMessage(string(d.Body), r.Config.ElasticsearchConnectionString)
 		}
 	}()
 
@@ -164,9 +180,9 @@ func readMessages(config Configuration) {
 	<-forever
 }
 
-func main() {
-	config := createConfiguration()
-	fmt.Println(config)
+// func main() {
+// 	config := createConfiguration()
+// 	fmt.Println(config)
 
-	readMessages(config)
-}
+// 	readMessages(config)
+// }
